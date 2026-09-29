@@ -6,22 +6,20 @@
 #include "serial_port.h"
 
 #include <stdio.h>
-#include <unistd.h>
 
-// MISC
-#define _POSIX_SOURCE 1 // POSIX compliant source
-#define BUF_SIZE 256
+// Valores usados nas tramas SET e UA.
+#define FLAG 0x7E
+#define A_TX 0x03
+#define A_RX 0x01
+#define C_SET 0x03
+#define C_UA 0x07
+#define SUPERVISION_FRAME_SIZE 5
 
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and send a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -30,26 +28,49 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Create string to send
-    unsigned char buf[BUF_SIZE] = {0};
+    // O transmissor envia SET para pedir a ligação.
+    unsigned char setFrame[SUPERVISION_FRAME_SIZE] = {FLAG, A_TX, C_SET, A_TX ^ C_SET, FLAG};
 
-    for (int i = 0; i < BUF_SIZE; i++)
+    int bytesWritten = writeBytesSerialPort(setFrame, SUPERVISION_FRAME_SIZE);
+    if (bytesWritten != SUPERVISION_FRAME_SIZE)
     {
-        buf[i] = 'a' + i % 26;
+        printf("Erro ao enviar a trama SET.\n");
+        closeSerialPort();
+        return -1;
+    }
+    printf("SET enviada: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
+
+    // Lê os cinco bytes da resposta UA.
+    unsigned char uaFrame[SUPERVISION_FRAME_SIZE];
+    int bytesReceived = 0;
+    while (bytesReceived < SUPERVISION_FRAME_SIZE)
+    {
+        int result = readByteSerialPort(&uaFrame[bytesReceived]);
+        if (result < 0)
+        {
+            perror("readByteSerialPort");
+            closeSerialPort();
+            return -1;
+        }
+        if (result == 1)
+        {
+            bytesReceived++;
+        }
     }
 
-    // In non-canonical mode, '\n' does not end the writing.
-    // Test this condition by placing a '\n' in the middle of the buffer.
-    // The whole buffer must be sent even with the '\n'.
-    buf[5] = '\n';
+    printf("Resposta recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
 
-    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-    printf("%d bytes written to serial port\n", bytes);
+    // Confirma se a resposta recebida é um UA válido.
+    if (uaFrame[0] != FLAG || uaFrame[1] != A_RX || uaFrame[2] != C_UA ||
+        uaFrame[3] != (A_RX ^ C_UA) || uaFrame[4] != FLAG)
+    {
+        printf("Erro: a trama recebida nao e um UA valido.\n");
+        closeSerialPort();
+        return -1;
+    }
 
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
+    printf("Ligacao estabelecida no transmissor.\n");
 
-    // Close serial port
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -63,11 +84,6 @@ int llOpenTx(LinkLayer llParameters)
 
 int llOpenRx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and receive a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -76,36 +92,50 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
-
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
-
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
-    volatile int STOP = FALSE;
-    int nBytesBuf = 0;
-
-    while (STOP == FALSE)
+    // O recetor espera pelos cinco bytes da trama SET.
+    unsigned char setFrame[SUPERVISION_FRAME_SIZE];
+    int bytesReceived = 0;
+    while (bytesReceived < SUPERVISION_FRAME_SIZE)
     {
-        // Read one byte from serial port.
-        // NOTE: You must check how many bytes were actually read by reading the return value.
-        // In this example, we assume that the byte is always read, which may not be true.
-        unsigned char byte;
-        int bytes = readByteSerialPort(&byte);
-        nBytesBuf += bytes;
-
-        printf("Byte received: %c\n", byte);
-
-        if (byte == 'z')
+        int result = readByteSerialPort(&setFrame[bytesReceived]);
+        if (result < 0)
         {
-            printf("Received 'z' char. Stop reading from serial port.\n");
-            STOP = TRUE;
+            perror("readByteSerialPort");
+            closeSerialPort();
+            return -1;
+        }
+        if (result == 1)
+        {
+            bytesReceived++;
         }
     }
 
-    printf("Total bytes received: %d\n", nBytesBuf);
+    printf("SET recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
 
-    // Close serial port
+    // Confirma se o que recebeu é uma trama SET válida.
+    if (setFrame[0] != FLAG || setFrame[1] != A_TX || setFrame[2] != C_SET ||
+        setFrame[3] != (A_TX ^ C_SET) || setFrame[4] != FLAG)
+    {
+        printf("Erro: a trama recebida nao e um SET valido.\n");
+        closeSerialPort();
+        return -1;
+    }
+
+    // Se o SET estiver certo, responde com UA.
+    unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
+        FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
+
+    int bytesWritten = writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE);
+    if (bytesWritten != SUPERVISION_FRAME_SIZE)
+    {
+        printf("Erro ao enviar a trama UA.\n");
+        closeSerialPort();
+        return -1;
+    }
+    printf("UA enviada: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
+
+    printf("Ligacao estabelecida no recetor.\n");
+
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
