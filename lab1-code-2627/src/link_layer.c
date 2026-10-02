@@ -3,17 +3,34 @@
 // Link layer protocol implementation
 
 #include "link_layer.h"
+#include "frame.h"
 #include "serial_port.h"
-
+#include <signal.h>
 #include <stdio.h>
+#include <unistd.h>
 
-// Valores usados nas tramas SET e UA.
-#define FLAG 0x7E
-#define A_TX 0x03
-#define A_RX 0x01
-#define C_SET 0x03
-#define C_UA 0x07
-#define SUPERVISION_FRAME_SIZE 5
+static volatile sig_atomic_t alarmCount = 0;
+
+static void alarmHandler(int signal)
+{
+    (void)signal;
+    alarmCount++;
+}
+
+static int configureAlarmHandler(void)
+{
+    struct sigaction action = {0};
+    action.sa_handler = alarmHandler;
+    sigemptyset(&action.sa_mask);
+
+    if (sigaction(SIGALRM, &action, NULL) == -1)
+    {
+        perror("sigaction");
+        return -1;
+    }
+
+    return 0;
+}
 
 ////////////////////////////////////////////////
 // LLOPEN
@@ -28,49 +45,51 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // O transmissor envia SET para pedir a ligação.
+    if (configureAlarmHandler() < 0)
+    {
+        closeSerialPort();
+        return -1;
+    }
+
+    // O transmissor envia SET para pedir a ligacao.
     unsigned char setFrame[SUPERVISION_FRAME_SIZE] = {FLAG, A_TX, C_SET, A_TX ^ C_SET, FLAG};
+    int connectionEstablished = FALSE;
+    int totalAttempts = llParameters.nRetransmissions + 1;
 
-    int bytesWritten = writeBytesSerialPort(setFrame, SUPERVISION_FRAME_SIZE);
-    if (bytesWritten != SUPERVISION_FRAME_SIZE)
-    {
-        printf("Erro ao enviar a trama SET.\n");
-        closeSerialPort();
-        return -1;
-    }
-    printf("SET enviada: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
+    alarmCount = 0;
 
-    // Lê os cinco bytes da resposta UA.
-    unsigned char uaFrame[SUPERVISION_FRAME_SIZE];
-    int bytesReceived = 0;
-    while (bytesReceived < SUPERVISION_FRAME_SIZE)
+    for (int attempt = 1; attempt <= totalAttempts; attempt++)
     {
-        int result = readByteSerialPort(&uaFrame[bytesReceived]);
-        if (result < 0)
+        printf("Sending SET (attempt %d of %d): 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n",
+               attempt, totalAttempts, setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
+
+        int receivedFrame = sendFrameTX(setFrame, SUPERVISION_FRAME_SIZE, llParameters.timeout);
+
+        if (receivedFrame == FRAME_OK)
         {
-            perror("readByteSerialPort");
-            closeSerialPort();
-            return -1;
+            connectionEstablished = TRUE;
+            printf("UA received. Connection established at transmitter.\n");
+            break;
         }
-        if (result == 1)
+
+        if (receivedFrame == FRAME_TIMEOUT)
         {
-            bytesReceived++;
+            printf("Timeout. SET will be retransmitted (alarm #%d).\n", (int)alarmCount);
+            continue;
         }
-    }
 
-    printf("Resposta recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
-
-    // Confirma se a resposta recebida é um UA válido.
-    if (uaFrame[0] != FLAG || uaFrame[1] != A_RX || uaFrame[2] != C_UA ||
-        uaFrame[3] != (A_RX ^ C_UA) || uaFrame[4] != FLAG)
-    {
-        printf("Erro: a trama recebida nao e um UA valido.\n");
         closeSerialPort();
         return -1;
     }
 
-    printf("Ligacao estabelecida no transmissor.\n");
+    if (!connectionEstablished)
+    {
+        printf("Could not establish connection after %d attempts.\n", totalAttempts);
+        closeSerialPort();
+        return -1;
+    }
 
+    // Fecha a porta depois de a ligacao estar confirmada.
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -92,50 +111,30 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // O recetor espera pelos cinco bytes da trama SET.
-    unsigned char setFrame[SUPERVISION_FRAME_SIZE];
-    int bytesReceived = 0;
-    while (bytesReceived < SUPERVISION_FRAME_SIZE)
+    // A maquina de estados só termina quando receber uma SET valida.
+    if (receiveSupervisionFrame(A_TX, C_SET) != FRAME_OK)
     {
-        int result = readByteSerialPort(&setFrame[bytesReceived]);
-        if (result < 0)
-        {
-            perror("readByteSerialPort");
-            closeSerialPort();
-            return -1;
-        }
-        if (result == 1)
-        {
-            bytesReceived++;
-        }
-    }
-
-    printf("SET recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
-
-    // Confirma se o que recebeu é uma trama SET válida.
-    if (setFrame[0] != FLAG || setFrame[1] != A_TX || setFrame[2] != C_SET ||
-        setFrame[3] != (A_TX ^ C_SET) || setFrame[4] != FLAG)
-    {
-        printf("Erro: a trama recebida nao e um SET valido.\n");
         closeSerialPort();
         return -1;
     }
 
+    printf("Valid SET received.\n");
+
     // Se o SET estiver certo, responde com UA.
-    unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
-        FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
+    unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
 
     int bytesWritten = writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE);
     if (bytesWritten != SUPERVISION_FRAME_SIZE)
     {
-        printf("Erro ao enviar a trama UA.\n");
+        printf("Error sending UA frame.\n");
         closeSerialPort();
         return -1;
     }
-    printf("UA enviada: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
+    printf("UA sent: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
 
-    printf("Ligacao estabelecida no recetor.\n");
+    printf("Connection established at receiver.\n");
 
+    // Fechar serial port após a comunicação
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
