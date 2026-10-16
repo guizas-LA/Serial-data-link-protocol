@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # LAB 1 RC
 
 ## Testing the Project
@@ -49,3 +50,19 @@ make check_files
 ```
 
 This checks whether the received file is identical to the original file.
+=======
+# Redes-Computadores
+
+Na pasta raiz do projeto:
+
+
+Porta série:
+- make run_rx
+
+Porta série:
+- make run_tx
+
+Cable:
+- run_cable
+- on/off
+>>>>>>> 1086c04 (Update README)
