@@ -13,6 +13,7 @@
 #define A_RX 0x01
 #define C_SET 0x03
 #define C_UA 0x07
+#define C_DISC 0x0B
 #define SUPERVISION_FRAME_SIZE 5
 
 // A porta fica aberta entre llOpen*() e llClose*().
@@ -180,14 +181,98 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: Implement this function
+    if (!linkIsOpen)
+        return -1;
+
+    // Tx inicia o fecho com DISC; Rx responde com DISC e Tx termina com UA.
+    unsigned char discFrame[SUPERVISION_FRAME_SIZE] = {
+        FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG};
+    if (writeBytesSerialPort(discFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
+    {
+        printf("Erro ao enviar a trama DISC.\n");
+        return closeLinkOnError();
+    }
+
+    unsigned char receivedFrame[SUPERVISION_FRAME_SIZE];
+    if (readSupervisionFrame(receivedFrame) < 0)
+    {
+        perror("readByteSerialPort");
+        return closeLinkOnError();
+    }
+    if (receivedFrame[1] != A_RX || receivedFrame[2] != C_DISC ||
+        receivedFrame[3] != (A_RX ^ C_DISC) || receivedFrame[4] != FLAG)
+    {
+        printf("Erro: a trama recebida nao e um DISC valido.\n");
+        return closeLinkOnError();
+    }
+
+    unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
+        FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG};
+    if (writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
+    {
+        printf("Erro ao enviar a trama UA.\n");
+        return closeLinkOnError();
+    }
+
+    if (closeSerialPort() < 0)
+    {
+        perror("closeSerialPort");
+        linkIsOpen = 0;
+        return -1;
+    }
+    linkIsOpen = 0;
+    printf("Ligacao fechada no transmissor.\n");
 
     return 0;
 }
 
 int llCloseRx()
 {
-    // TODO: Implement this function
+    if (!linkIsOpen)
+        return -1;
+
+    // Rx recebe o DISC do Tx, responde com DISC e espera o UA final.
+    unsigned char receivedFrame[SUPERVISION_FRAME_SIZE];
+    if (readSupervisionFrame(receivedFrame) < 0)
+    {
+        perror("readByteSerialPort");
+        return closeLinkOnError();
+    }
+    if (receivedFrame[1] != A_TX || receivedFrame[2] != C_DISC ||
+        receivedFrame[3] != (A_TX ^ C_DISC) || receivedFrame[4] != FLAG)
+    {
+        printf("Erro: a trama recebida nao e um DISC valido.\n");
+        return closeLinkOnError();
+    }
+
+    unsigned char discFrame[SUPERVISION_FRAME_SIZE] = {
+        FLAG, A_RX, C_DISC, A_RX ^ C_DISC, FLAG};
+    if (writeBytesSerialPort(discFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
+    {
+        printf("Erro ao enviar a trama DISC.\n");
+        return closeLinkOnError();
+    }
+
+    if (readSupervisionFrame(receivedFrame) < 0)
+    {
+        perror("readByteSerialPort");
+        return closeLinkOnError();
+    }
+    if (receivedFrame[1] != A_TX || receivedFrame[2] != C_UA ||
+        receivedFrame[3] != (A_TX ^ C_UA) || receivedFrame[4] != FLAG)
+    {
+        printf("Erro: a trama recebida nao e um UA valido.\n");
+        return closeLinkOnError();
+    }
+
+    if (closeSerialPort() < 0)
+    {
+        perror("closeSerialPort");
+        linkIsOpen = 0;
+        return -1;
+    }
+    linkIsOpen = 0;
+    printf("Ligacao fechada no recetor.\n");
 
     return 0;
 }
