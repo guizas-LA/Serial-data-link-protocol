@@ -1,23 +1,44 @@
+// RCOM 2026/2027
+
+
 #include "frame.h"
 #include "serial_port.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 
-// Envia uma trama SET e espera pela resposta UA do recetor.
+/* Envia uma trama e espera pela resposta UA ate ocorrer timeout. */
 int sendFrameTX(const unsigned char frame[], int size, int timeout)
 {
-    int bytesWritten = writeBytesSerialPort(frame, size);
+    int totalWritten = 0;
 
-    if (bytesWritten != size)
+    /* write() pode enviar menos bytes do que os pedidos. */
+    while (totalWritten < size)
     {
-        printf("Error sending frame.\n");
-        return FRAME_ERROR;
+        int bytesWritten = writeBytesSerialPort(frame + totalWritten,
+                                            size - totalWritten);
+
+        if (bytesWritten < 0)
+        {
+            if (errno == EINTR)
+                continue;
+
+            perror("writeBytesSerialPort");
+            return FRAME_ERROR;
+        }
+
+        if (bytesWritten == 0)
+        {
+            fprintf(stderr, "Nao foi possivel enviar a trama completa.\n");
+            return FRAME_ERROR;
+        }
+
+        totalWritten += bytesWritten;
     }
 
-    alarm(timeout);
+    alarm((unsigned int)timeout);
     int receivedFrame = receiveSupervisionFrame(A_RX, C_UA);
-
     alarm(0);
 
     return receivedFrame;
@@ -32,8 +53,9 @@ typedef enum
     BCC_OK
 } FrameState;
 
-// Lê bytes ate receber uma trama valida com os campos esperados.
-int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expectedControl)
+/* Le bytes ate encontrar uma trama com endereco, controlo e BCC vabytesRead. */
+int receiveSupervisionFrame(unsigned char expectedAddress,
+                            unsigned char expectedControl)
 {
     FrameState state = START;
     unsigned char byte;
@@ -44,76 +66,55 @@ int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expecte
 
         if (bytesRead < 0)
         {
+            /* No transmissor, EINTR indica que terminou o timeout. */
             if (errno == EINTR)
-            {
                 return FRAME_TIMEOUT;
-            }
 
             perror("readByteSerialPort");
             return FRAME_ERROR;
         }
 
         if (bytesRead == 0)
-        {
             continue;
-        }
 
         switch (state)
         {
         case START:
-            state = (byte == FLAG) ? FLAG_RCV : START;
+            if (byte == FLAG)
+                state = FLAG_RCV;
             break;
 
         case FLAG_RCV:
             if (byte == FLAG)
-            {
                 state = FLAG_RCV;
-            }
             else if (byte == expectedAddress)
-            {
                 state = A_RCV;
-            }
             else
-            {
                 state = START;
-            }
             break;
 
         case A_RCV:
             if (byte == FLAG)
-            {
                 state = FLAG_RCV;
-            }
             else if (byte == expectedControl)
-            {
                 state = C_RCV;
-            }
             else
-            {
                 state = START;
-            }
             break;
 
         case C_RCV:
-            if (byte == FLAG)
-            {
-                state = FLAG_RCV;
-            }
-            else if (byte == (unsigned char)(expectedAddress ^ expectedControl))
-            {
+            if (byte == (unsigned char)(expectedAddress ^ expectedControl))
                 state = BCC_OK;
-            }
+            else if (byte == FLAG)
+                state = FLAG_RCV;
             else
-            {
                 state = START;
-            }
             break;
 
         case BCC_OK:
             if (byte == FLAG)
-            {
                 return FRAME_OK;
-            }
+
             state = START;
             break;
         }
