@@ -1,5 +1,6 @@
 // RCOM 2026/2027
-
+//
+// Application layer protocol implementation
 
 #include "frame.h"
 #include "serial_port.h"
@@ -53,7 +54,7 @@ typedef enum
     BCC_OK
 } FrameState;
 
-/* Le bytes ate encontrar uma trama com endereco, controlo e BCC vabytesRead. */
+/* Le bytes ate encontrar uma trama com endereco, controlo e BCC validos. */
 int receiveSupervisionFrame(unsigned char expectedAddress,
                             unsigned char expectedControl)
 {
@@ -115,6 +116,7 @@ int receiveSupervisionFrame(unsigned char expectedAddress,
             if (byte == FLAG)
                 return FRAME_OK;
 
+            /* A trama era invalida; volta a procurar o inicio. */
             state = START;
             break;
         }
