@@ -1,6 +1,4 @@
 // RCOM 2026/2027
-//
-// Application layer protocol implementation
 
 #include "frame.h"
 #include "serial_port.h"
@@ -10,8 +8,7 @@
 #include <unistd.h>
 
 /* Envia uma trama e espera pela resposta UA ate ocorrer timeout. */
-int sendFrameTX(const unsigned char frame[], int size, int timeout)
-{
+int sendFrameTX(const unsigned char frame[], int size, int timeout) {
     int totalWritten = 0;
 
     /* write() pode enviar menos bytes do que os pedidos. */
@@ -31,7 +28,7 @@ int sendFrameTX(const unsigned char frame[], int size, int timeout)
 
         if (bytesWritten == 0)
         {
-            fprintf(stderr, "Nao foi possivel enviar a trama completa.\n");
+            fprintf(stderr, "Could not send the complete frame.\n");
             return FRAME_ERROR;
         }
 
@@ -39,14 +36,14 @@ int sendFrameTX(const unsigned char frame[], int size, int timeout)
     }
 
     alarm((unsigned int)timeout);
-    int receivedFrame = receiveSupervisionFrame(A_RX, C_UA);
+    /* O UA e uma resposta enviada pelo Recetor, logo A = A_TX (0x03) */
+    int receivedFrame = receiveSupervisionFrame(A_TX, C_UA);
     alarm(0);
 
     return receivedFrame;
 }
 
-typedef enum
-{
+typedef enum{
     START,
     FLAG_RCV,
     A_RCV,
@@ -54,20 +51,16 @@ typedef enum
     BCC_OK
 } FrameState;
 
-/* Le bytes ate encontrar uma trama com endereco, controlo e BCC validos. */
-int receiveSupervisionFrame(unsigned char expectedAddress,
-                            unsigned char expectedControl)
-{
+/* Le bytes ate encontrar uma trama com endereco, controlo e BCC1 validos. */
+int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expectedControl) {
     FrameState state = START;
     unsigned char byte;
 
-    while (1)
-    {
+    while (1) {
         int bytesRead = readByteSerialPort(&byte);
 
-        if (bytesRead < 0)
-        {
-            /* No transmissor, EINTR indica que terminou o timeout. */
+        if (bytesRead < 0) {
+            /* No transmissor, EINTR indica que o alarme disparou (timeout). */
             if (errno == EINTR)
                 return FRAME_TIMEOUT;
 
@@ -78,8 +71,7 @@ int receiveSupervisionFrame(unsigned char expectedAddress,
         if (bytesRead == 0)
             continue;
 
-        switch (state)
-        {
+        switch (state) {
         case START:
             if (byte == FLAG)
                 state = FLAG_RCV;
@@ -116,7 +108,7 @@ int receiveSupervisionFrame(unsigned char expectedAddress,
             if (byte == FLAG)
                 return FRAME_OK;
 
-            /* A trama era invalida; volta a procurar o inicio. */
+            /* Trama invalida; volta a procurar o inicio. */
             state = START;
             break;
         }
