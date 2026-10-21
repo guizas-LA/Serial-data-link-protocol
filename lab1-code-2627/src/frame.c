@@ -57,12 +57,18 @@ int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expecte
     unsigned char byte;
 
     while (1) {
+        /* O alarme pode ter disparado fora do read(); nesse caso e timeout */
+        if (alarmCount)
+            return FRAME_TIMEOUT;
+
         int bytesRead = readByteSerialPort(&byte);
 
         if (bytesRead < 0) {
             /* No transmissor, EINTR indica que o alarme disparou (timeout). */
-            if (errno == EINTR)
+            if (errno == EINTR && alarmCount)
                 return FRAME_TIMEOUT;
+            if (errno == EINTR)
+                continue;
 
             perror("readByteSerialPort");
             return FRAME_ERROR;

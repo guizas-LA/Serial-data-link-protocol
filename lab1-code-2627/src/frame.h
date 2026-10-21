@@ -16,6 +16,11 @@
 #define FRAME_TIMEOUT 1
 #define FRAME_ERROR -1
 
+#include <signal.h>
+
+/* Flag do alarme (definida em link_layer.c), fica a 1 quando ha timeout */
+extern volatile sig_atomic_t alarmCount;
+
 int sendFrameTX(const unsigned char frame[], int size, int timeout);
 
 int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expectedControl);

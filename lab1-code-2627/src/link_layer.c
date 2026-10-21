@@ -22,7 +22,7 @@
 #define READ_ERROR   -1
 #define READ_TIMEOUT -2
 
-static volatile sig_atomic_t alarmCount = 0;
+volatile sig_atomic_t alarmCount = 0;
 static unsigned char txSequence = 0;
 static unsigned char rxExpectedSequence = 0;
 static int maxRetransmissions = 3;

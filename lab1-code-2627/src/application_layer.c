@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-// Escolher o marco a testar: 1, 2 ou 3
 #define TEST_MILESTONE 3
 
 #define NUMBER_OF_TEST_PACKETS 6
