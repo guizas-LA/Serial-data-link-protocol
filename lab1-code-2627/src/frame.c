@@ -1,80 +1,146 @@
 // RCOM 2026/2027
+//
+// Frame building, sending and receiving
 
 #include "frame.h"
+#include "alarm.h"
 #include "serial_port.h"
-
 #include <errno.h>
 #include <stdio.h>
-#include <unistd.h>
 
-/* Envia uma trama e espera pela resposta UA ate ocorrer timeout. */
-int sendFrameTX(const unsigned char frame[], int size, int timeout) {
-    int totalWritten = 0;
-
-    /* write() pode enviar menos bytes do que os pedidos. */
-    while (totalWritten < size)
-    {
-        int bytesWritten = writeBytesSerialPort(frame + totalWritten,
-                                            size - totalWritten);
-
-        if (bytesWritten < 0)
-        {
-            if (errno == EINTR)
-                continue;
-
-            perror("writeBytesSerialPort");
-            return FRAME_ERROR;
-        }
-
-        if (bytesWritten == 0)
-        {
-            fprintf(stderr, "Could not send the complete frame.\n");
-            return FRAME_ERROR;
-        }
-
-        totalWritten += bytesWritten;
-    }
-
-    alarm((unsigned int)timeout);
-    /* O UA e uma resposta enviada pelo Recetor, logo A = A_TX (0x03) */
-    int receivedFrame = receiveSupervisionFrame(A_TX, C_UA);
-    alarm(0);
-
-    return receivedFrame;
-}
-
-typedef enum{
+typedef enum {
     START,
     FLAG_RCV,
     A_RCV,
     C_RCV,
-    BCC_OK
-} FrameState;
+    BCC1_OK,
+    DATA,
+    ESC_RCV
+} State;
 
-/* Le bytes ate encontrar uma trama com endereco, controlo e BCC1 validos. */
-int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expectedControl) {
-    FrameState state = START;
-    unsigned char byte;
+////////////////////////////////////////////////
+// FRAME HELPERS
+////////////////////////////////////////////////
 
-    while (1) {
-        /* O alarme pode ter disparado fora do read(); nesse caso e timeout */
-        if (alarmCount)
+const char *frameName(unsigned char c) {
+    switch (c) {
+    case C_SET:
+        return "SET";
+    case C_UA:
+        return "UA";
+    case C_DISC:
+        return "DISC";
+    case C_RR(0):
+        return "RR0";
+    case C_RR(1):
+        return "RR1";
+    case C_REJ(0):
+        return "REJ0";
+    case C_REJ(1):
+        return "REJ1";
+    case C_I(0):
+        return "I0";
+    case C_I(1):
+        return "I1";
+    default:
+        return "unknown frame";
+    }
+}
+
+int isInformationFrame(unsigned char c) {
+    return c == C_I(0) || c == C_I(1);
+}
+
+static unsigned char calcBCC2(const unsigned char *data, int dataSize) {
+    unsigned char bcc2 = 0;
+
+    for (int i = 0; i < dataSize; i++)
+        bcc2 ^= data[i];
+
+    return bcc2;
+}
+
+
+static int stuffByte(unsigned char *dst, unsigned char byte) {
+    if (byte == FLAG || byte == ESC)
+    {
+        dst[0] = ESC;
+        dst[1] = byte ^ ESC_XOR;
+        return 2;
+    }
+
+    dst[0] = byte;
+    return 1;
+}
+
+
+int buildInformationFrame(unsigned char *frame, const unsigned char *data, int dataSize, unsigned char ns) {
+    unsigned char c = C_I(ns);
+    int size = 0;
+
+    frame[size++] = FLAG;
+    frame[size++] = A_TX;
+    frame[size++] = c;
+    frame[size++] = A_TX ^ c;
+
+    for (int i = 0; i < dataSize; i++)
+        size += stuffByte(frame + size, data[i]);
+
+    size += stuffByte(frame + size, calcBCC2(data, dataSize));
+
+    frame[size++] = FLAG;
+
+    return size;
+}
+
+////////////////////////////////////////////////
+// SENDING AND RECEIVING FRAMES
+////////////////////////////////////////////////
+
+int writeFrame(const unsigned char *frame, int frameSize) {
+    int written = 0;
+
+    while (written < frameSize)
+    {
+        int bytes = writeBytesSerialPort(frame + written, frameSize - written);
+        if (bytes < 0)
+            return -1;
+        written += bytes;
+    }
+
+    return written;
+}
+
+
+int sendSupervisionFrame(unsigned char a, unsigned char c) {
+    unsigned char frame[SU_FRAME_SIZE] = {FLAG, a, c, a ^ c, FLAG};
+
+    int bytes = writeFrame(frame, SU_FRAME_SIZE);
+
+    printf("Enviado %s:", frameName(c));
+    for (int i = 0; i < SU_FRAME_SIZE; i++)
+        printf(" 0x%02X", frame[i]);
+    printf(" (%d bytes)\n", bytes);
+
+    return bytes;
+}
+
+
+FrameResult readFrame(Frame *frame) {
+    State state = START;
+
+    while (TRUE) {
+        if (alarmFired)
             return FRAME_TIMEOUT;
 
-        int bytesRead = readByteSerialPort(&byte);
-
-        if (bytesRead < 0) {
-            /* No transmissor, EINTR indica que o alarme disparou (timeout). */
-            if (errno == EINTR && alarmCount)
-                return FRAME_TIMEOUT;
+        unsigned char byte;
+        int bytes = readByteSerialPort(&byte);
+        if (bytes < 0) {
             if (errno == EINTR)
                 continue;
-
-            perror("readByteSerialPort");
-            return FRAME_ERROR;
+            return FRAME_IO_ERROR;
         }
-
-        if (bytesRead == 0)
+        if (bytes == 0)
             continue;
 
         switch (state) {
@@ -84,39 +150,88 @@ int receiveSupervisionFrame(unsigned char expectedAddress, unsigned char expecte
             break;
 
         case FLAG_RCV:
-            if (byte == FLAG)
-                state = FLAG_RCV;
-            else if (byte == expectedAddress)
+            if (byte == A_TX || byte == A_RX)
+            {
+                frame->a = byte;
                 state = A_RCV;
-            else
+            }
+            else if (byte != FLAG)
                 state = START;
             break;
 
         case A_RCV:
             if (byte == FLAG)
                 state = FLAG_RCV;
-            else if (byte == expectedControl)
-                state = C_RCV;
             else
-                state = START;
+            {
+                frame->c = byte;
+                state = C_RCV;
+            }
             break;
 
         case C_RCV:
-            if (byte == (unsigned char)(expectedAddress ^ expectedControl))
-                state = BCC_OK;
+            if (byte == (frame->a ^ frame->c))
+            {
+                frame->dataSize = 0;
+                state = BCC1_OK;
+            }
             else if (byte == FLAG)
                 state = FLAG_RCV;
             else
                 state = START;
             break;
 
-        case BCC_OK:
-            if (byte == FLAG)
-                return FRAME_OK;
+        case BCC1_OK:
+            if (!isInformationFrame(frame->c)) {
+                if (byte == FLAG)
+                    return FRAME_OK;
+                state = START;
+                break;
+            }
+            state = DATA;
 
-            /* Trama invalida; volta a procurar o inicio. */
-            state = START;
+        case DATA:
+            if (byte == FLAG) {
+                if (frame->dataSize == 0)
+                    return FRAME_DATA_ERROR;
+                frame->dataSize--;
+                if (calcBCC2(frame->data, frame->dataSize) != frame->data[frame->dataSize])
+                    return FRAME_DATA_ERROR;
+                return FRAME_OK;
+            }
+            if (byte == ESC) {
+                state = ESC_RCV;
+                break;
+            }
+            if (frame->dataSize == sizeof(frame->data))
+                return FRAME_DATA_ERROR;
+            frame->data[frame->dataSize++] = byte;
             break;
+
+            case ESC_RCV:
+            if (byte == FLAG)
+                return FRAME_DATA_ERROR;
+            if (frame->dataSize == sizeof(frame->data))
+                return FRAME_DATA_ERROR;
+            frame->data[frame->dataSize++] = byte ^ ESC_XOR;
+            state = DATA;
+            break;
+        }
+    }
+}
+
+
+int receiveSupervisionFrame(unsigned char a, unsigned char c) {
+    Frame frame;
+
+    while (TRUE) {
+        FrameResult result = readFrame(&frame);
+        if (result == FRAME_TIMEOUT || result == FRAME_IO_ERROR)
+            return -1;
+
+        if (result == FRAME_OK && frame.a == a && frame.c == c) {
+            printf("Recebido %s\n", frameName(c));
+            return 0;
         }
     }
 }
