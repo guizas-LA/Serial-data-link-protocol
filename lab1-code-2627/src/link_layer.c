@@ -5,7 +5,10 @@
 #include "link_layer.h"
 #include "serial_port.h"
 
+#include <errno.h>
 #include <stdio.h>
+#include <sys/select.h>
+#include <time.h>
 
 // Valores usados nas tramas SET e UA.
 #define FLAG 0x7E
@@ -26,6 +29,60 @@ static int linkIsOpen = 0;
 static int linkIsTx = 0;
 static unsigned char nextTxSequence = 0;
 static unsigned char expectedRxSequence = 0;
+static LinkLayer activeParameters;
+
+static int makeDeadline(struct timespec *deadline, int timeoutSeconds)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, deadline) < 0)
+        return -1;
+    deadline->tv_sec += timeoutSeconds;
+    return 0;
+}
+
+// Retorna 1 se leu um byte, 0 se expirou e -1 em erro.
+static int readByteUntil(unsigned char *byte, const struct timespec *deadline)
+{
+    if (deadline == NULL)
+        return readByteSerialPort(byte);
+
+    extern int fd; // descritor mantido pela biblioteca serial_port.c
+    while (1)
+    {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+            return -1;
+
+        time_t seconds = deadline->tv_sec - now.tv_sec;
+        long nanoseconds = deadline->tv_nsec - now.tv_nsec;
+        if (nanoseconds < 0)
+        {
+            seconds--;
+            nanoseconds += 1000000000L;
+        }
+        if (seconds < 0 || (seconds == 0 && nanoseconds <= 0))
+            return 0;
+
+        struct timeval timeout = {
+            .tv_sec = seconds,
+            .tv_usec = (nanoseconds + 999) / 1000};
+        if (timeout.tv_usec >= 1000000)
+        {
+            timeout.tv_sec++;
+            timeout.tv_usec -= 1000000;
+        }
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(fd, &readSet);
+        int ready = select(fd + 1, &readSet, NULL, NULL, &timeout);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready < 0)
+            return -1;
+        if (ready == 0)
+            return 0;
+        return readByteSerialPort(byte);
+    }
+}
 
 static int writeAll(const unsigned char *bytes, int length)
 {
@@ -72,30 +129,41 @@ static int sendSupervision(unsigned char address, unsigned char control)
 }
 
 // Lê uma trama delimitada por FLAG e remove o byte stuffing.
-// Retorna 0 com o conteúdo e comprimento, 1 para trama malformada e -1 para erro I/O.
-static int readFrame(unsigned char *content, int capacity, int *contentLength)
+// Retorna 0 numa trama, 1 numa trama inválida, 2 em timeout e -1 em erro I/O.
+static int readFrame(unsigned char *content, int capacity, int *contentLength,
+                     int timeoutSeconds)
 {
     unsigned char byte;
     int length = 0;
     int malformed = 0;
     int escaped = 0;
+    struct timespec deadline;
+    const struct timespec *deadlinePointer = NULL;
+    if (timeoutSeconds > 0)
+    {
+        if (makeDeadline(&deadline, timeoutSeconds) < 0)
+            return -1;
+        deadlinePointer = &deadline;
+    }
 
     while (1)
     {
-        int result = readByteSerialPort(&byte);
+        int result = readByteUntil(&byte, deadlinePointer);
         if (result < 0)
             return -1;
+        if (result == 0)
+            return 2;
         if (result == 1 && byte == FLAG)
             break;
     }
 
     while (1)
     {
-        int result = readByteSerialPort(&byte);
+        int result = readByteUntil(&byte, deadlinePointer);
         if (result < 0)
             return -1;
         if (result == 0)
-            continue;
+            return 2;
 
         if (byte == FLAG)
         {
@@ -132,32 +200,33 @@ static int readFrame(unsigned char *content, int capacity, int *contentLength)
 
 // Procura o FLAG inicial e lê o resto de uma trama de supervisão.
 // Por agora, SET/UA têm tamanho fixo de cinco bytes.
-static int readSupervisionFrame(unsigned char *frame)
+// Retorna 0 numa trama completa, 1 em timeout e -1 em erro I/O.
+static int readSupervisionFrameTimeout(unsigned char *frame, int timeoutSeconds)
 {
-    unsigned char byte;
-
-    while (1)
-    {
-        int result = readByteSerialPort(&byte);
-        if (result < 0)
-            return -1;
-        if (result == 1 && byte == FLAG)
-            break;
-    }
+    unsigned char content[3];
+    int contentLength = 0;
+    int result = readFrame(content, sizeof(content), &contentLength, timeoutSeconds);
+    if (result == 2)
+        return 1; // Timeout.
+    if (result != 0 || contentLength != 3)
+        return result < 0 ? -1 : 1;
 
     frame[0] = FLAG;
-    for (int i = 1; i < SUPERVISION_FRAME_SIZE; i++)
-    {
-        int result;
-        do
-        {
-            result = readByteSerialPort(&frame[i]);
-            if (result < 0)
-                return -1;
-        } while (result == 0);
-    }
-
+    frame[1] = content[0];
+    frame[2] = content[1];
+    frame[3] = content[2];
+    frame[4] = FLAG;
     return 0;
+}
+
+static int readSupervisionFrame(unsigned char *frame)
+{
+    int result;
+    do
+    {
+        result = readSupervisionFrameTimeout(frame, 0);
+    } while (result == 1);
+    return result;
 }
 
 static int closeLinkOnError(void)
@@ -172,7 +241,7 @@ static int closeLinkOnError(void)
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-    if (linkIsOpen)
+    if (linkIsOpen || llParameters.timeout <= 0 || llParameters.nRetransmissions < 0)
         return -1;
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
@@ -182,48 +251,49 @@ int llOpenTx(LinkLayer llParameters)
     }
     linkIsOpen = 1;
     linkIsTx = 1;
+    activeParameters = llParameters;
     nextTxSequence = 0;
     expectedRxSequence = 0;
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // O transmissor envia SET para pedir a ligação.
+    // SET é repetido se não chegar um UA válido antes do timeout.
     unsigned char setFrame[SUPERVISION_FRAME_SIZE] = {FLAG, A_TX, C_SET, A_TX ^ C_SET, FLAG};
-
-    int bytesWritten = writeBytesSerialPort(setFrame, SUPERVISION_FRAME_SIZE);
-    if (bytesWritten != SUPERVISION_FRAME_SIZE)
+    for (int attempt = 0; attempt <= llParameters.nRetransmissions; attempt++)
     {
-        printf("Erro ao enviar a trama SET.\n");
-        return closeLinkOnError();
+        if (writeAll(setFrame, SUPERVISION_FRAME_SIZE) < 0)
+        {
+            printf("Erro ao enviar a trama SET.\n");
+            return closeLinkOnError();
+        }
+        printf("SET enviada (tentativa %d/%d).\n", attempt + 1,
+               llParameters.nRetransmissions + 1);
+
+        // Lê e sincroniza com o FLAG inicial da resposta UA.
+        unsigned char uaFrame[SUPERVISION_FRAME_SIZE];
+        int result = readSupervisionFrameTimeout(uaFrame, llParameters.timeout);
+        if (result < 0)
+        {
+            perror("readByteSerialPort");
+            return closeLinkOnError();
+        }
+        if (result == 0 && uaFrame[1] == A_TX && uaFrame[2] == C_UA &&
+            uaFrame[3] == (A_TX ^ C_UA) && uaFrame[4] == FLAG)
+        {
+            printf("Ligacao estabelecida no transmissor.\n");
+            return 0;
+        }
+
+        printf("Timeout ou UA invalido; vou repetir SET se ainda houver tentativas.\n");
     }
-    printf("SET enviada: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", setFrame[0], setFrame[1], setFrame[2], setFrame[3], setFrame[4]);
 
-    // Lê e sincroniza com o FLAG inicial da resposta UA.
-    unsigned char uaFrame[SUPERVISION_FRAME_SIZE];
-    if (readSupervisionFrame(uaFrame) < 0)
-    {
-        perror("readByteSerialPort");
-        return closeLinkOnError();
-    }
-
-    printf("Resposta recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
-
-    // Confirma se a resposta recebida é um UA válido.
-    if (uaFrame[0] != FLAG || uaFrame[1] != A_TX || uaFrame[2] != C_UA ||
-        uaFrame[3] != (A_TX ^ C_UA) || uaFrame[4] != FLAG)
-    {
-        printf("Erro: a trama recebida nao e um UA valido.\n");
-        return closeLinkOnError();
-    }
-
-    printf("Ligacao estabelecida no transmissor.\n");
-
-    return 0;
+    printf("Nao foi possivel estabelecer a ligacao: limite de tentativas atingido.\n");
+    return closeLinkOnError();
 }
 
 int llOpenRx(LinkLayer llParameters)
 {
-    if (linkIsOpen)
+    if (linkIsOpen || llParameters.timeout <= 0 || llParameters.nRetransmissions < 0)
         return -1;
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
@@ -233,6 +303,7 @@ int llOpenRx(LinkLayer llParameters)
     }
     linkIsOpen = 1;
     linkIsTx = 0;
+    activeParameters = llParameters;
     nextTxSequence = 0;
     expectedRxSequence = 0;
 
@@ -260,8 +331,7 @@ int llOpenRx(LinkLayer llParameters)
     unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
         FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG};
 
-    int bytesWritten = writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE);
-    if (bytesWritten != SUPERVISION_FRAME_SIZE)
+    if (writeAll(uaFrame, SUPERVISION_FRAME_SIZE) < 0)
     {
         printf("Erro ao enviar a trama UA.\n");
         return closeLinkOnError();
@@ -304,7 +374,7 @@ int llSend(const unsigned char *buf, int bufSize)
         appendStuffedByte(unstuffed[i], txFrame, &txLength);
     txFrame[txLength++] = FLAG;
 
-    while (1)
+    for (int attempt = 0; attempt <= activeParameters.nRetransmissions; attempt++)
     {
         if (writeAll(txFrame, txLength) < 0)
             return -1;
@@ -312,9 +382,12 @@ int llSend(const unsigned char *buf, int bufSize)
         while (1)
         {
             int replyLength = 0;
-            int result = readFrame(reply, MAX_FRAME_CONTENT_SIZE, &replyLength);
+            int result = readFrame(reply, MAX_FRAME_CONTENT_SIZE, &replyLength,
+                                   activeParameters.timeout);
             if (result < 0)
                 return -1;
+            if (result == 2)
+                break; // Timeout: retransmite a trama I.
             if (result > 0 || replyLength != 3 || reply[0] != A_TX ||
                 reply[2] != (reply[0] ^ reply[1]))
                 continue;
@@ -325,9 +398,12 @@ int llSend(const unsigned char *buf, int bufSize)
                 return bufSize;
             }
             if (reply[1] == rejControl(nextTxSequence))
-                break; // REJ: volta a enviar a mesma trama I.
+                break; // REJ: volta ao ciclo externo e reenvia a mesma trama I.
         }
     }
+
+    printf("llSend: limite de retransmissoes atingido.\n");
+    return -1;
 
 }
 
@@ -343,10 +419,22 @@ int llReceive(unsigned char *packet)
     while (1)
     {
         int length = 0;
-        int result = readFrame(frame, MAX_FRAME_CONTENT_SIZE, &length);
+        int result = readFrame(frame, MAX_FRAME_CONTENT_SIZE, &length, 0);
         if (result < 0)
             return -1;
-        if (result > 0 || length < 4 || frame[0] != A_TX ||
+        if (result > 0)
+            continue;
+
+        // Se o UA do llOpenRx se perdeu, o Tx repete SET. Responde novamente.
+        if (length == 3 && frame[0] == A_TX && frame[1] == C_SET &&
+            frame[2] == (frame[0] ^ frame[1]))
+        {
+            if (sendSupervision(A_TX, C_UA) < 0)
+                return -1;
+            continue;
+        }
+
+        if (length < 4 || frame[0] != A_TX ||
             frame[2] != (frame[0] ^ frame[1]))
             continue; // Cabeçalho inválido ou trama malformada: ignora.
 
@@ -403,34 +491,45 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    if (!linkIsOpen)
+    if (!linkIsOpen || !linkIsTx)
         return -1;
 
     // Tx inicia o fecho com DISC; Rx responde com DISC e Tx termina com UA.
     unsigned char discFrame[SUPERVISION_FRAME_SIZE] = {
         FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG};
-    if (writeBytesSerialPort(discFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
-    {
-        printf("Erro ao enviar a trama DISC.\n");
-        return closeLinkOnError();
-    }
-
     unsigned char receivedFrame[SUPERVISION_FRAME_SIZE];
-    if (readSupervisionFrame(receivedFrame) < 0)
+    int gotReceiverDisc = 0;
+    for (int attempt = 0; attempt <= activeParameters.nRetransmissions; attempt++)
     {
-        perror("readByteSerialPort");
-        return closeLinkOnError();
+        if (writeAll(discFrame, SUPERVISION_FRAME_SIZE) < 0)
+        {
+            printf("Erro ao enviar a trama DISC.\n");
+            return closeLinkOnError();
+        }
+
+        int result = readSupervisionFrameTimeout(receivedFrame, activeParameters.timeout);
+        if (result < 0)
+        {
+            perror("readByteSerialPort");
+            return closeLinkOnError();
+        }
+        if (result == 0 && receivedFrame[1] == A_RX && receivedFrame[2] == C_DISC &&
+            receivedFrame[3] == (A_RX ^ C_DISC) && receivedFrame[4] == FLAG)
+        {
+            gotReceiverDisc = 1;
+            break;
+        }
+        printf("Timeout ou DISC invalido; vou repetir DISC se ainda houver tentativas.\n");
     }
-    if (receivedFrame[1] != A_RX || receivedFrame[2] != C_DISC ||
-        receivedFrame[3] != (A_RX ^ C_DISC) || receivedFrame[4] != FLAG)
+    if (!gotReceiverDisc)
     {
-        printf("Erro: a trama recebida nao e um DISC valido.\n");
+        printf("Fecho falhou: limite de tentativas atingido.\n");
         return closeLinkOnError();
     }
 
     unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
         FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
-    if (writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
+    if (writeAll(uaFrame, SUPERVISION_FRAME_SIZE) < 0)
     {
         printf("Erro ao enviar a trama UA.\n");
         return closeLinkOnError();
@@ -450,7 +549,7 @@ int llCloseTx()
 
 int llCloseRx()
 {
-    if (!linkIsOpen)
+    if (!linkIsOpen || linkIsTx)
         return -1;
 
     // Rx recebe o DISC do Tx, responde com DISC e espera o UA final.
@@ -469,22 +568,30 @@ int llCloseRx()
 
     unsigned char discFrame[SUPERVISION_FRAME_SIZE] = {
         FLAG, A_RX, C_DISC, A_RX ^ C_DISC, FLAG};
-    if (writeBytesSerialPort(discFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
+    for (int attempt = 0; attempt <= activeParameters.nRetransmissions; attempt++)
     {
-        printf("Erro ao enviar a trama DISC.\n");
-        return closeLinkOnError();
-    }
+        if (writeAll(discFrame, SUPERVISION_FRAME_SIZE) < 0)
+        {
+            printf("Erro ao enviar a trama DISC.\n");
+            return closeLinkOnError();
+        }
 
-    if (readSupervisionFrame(receivedFrame) < 0)
-    {
-        perror("readByteSerialPort");
-        return closeLinkOnError();
-    }
-    if (receivedFrame[1] != A_RX || receivedFrame[2] != C_UA ||
-        receivedFrame[3] != (A_RX ^ C_UA) || receivedFrame[4] != FLAG)
-    {
-        printf("Erro: a trama recebida nao e um UA valido.\n");
-        return closeLinkOnError();
+        int result = readSupervisionFrameTimeout(receivedFrame, activeParameters.timeout);
+        if (result < 0)
+        {
+            perror("readByteSerialPort");
+            return closeLinkOnError();
+        }
+        if (result == 0 && receivedFrame[1] == A_RX && receivedFrame[2] == C_UA &&
+            receivedFrame[3] == (A_RX ^ C_UA) && receivedFrame[4] == FLAG)
+            break;
+
+        if (attempt == activeParameters.nRetransmissions)
+        {
+            printf("Fecho falhou: limite de tentativas atingido.\n");
+            return closeLinkOnError();
+        }
+        printf("Timeout ou UA invalido; vou repetir DISC.\n");
     }
 
     if (closeSerialPort() < 0)
