@@ -14,10 +14,121 @@
 #define C_SET 0x03
 #define C_UA 0x07
 #define C_DISC 0x0B
+#define C_RR0 0xAA
+#define C_RR1 0xAB
+#define C_REJ0 0x54
+#define C_REJ1 0x55
 #define SUPERVISION_FRAME_SIZE 5
+#define MAX_FRAME_CONTENT_SIZE (2 * (MAX_PAYLOAD_SIZE + 1) + 4)
 
 // A porta fica aberta entre llOpen*() e llClose*().
 static int linkIsOpen = 0;
+static int linkIsTx = 0;
+static unsigned char nextTxSequence = 0;
+static unsigned char expectedRxSequence = 0;
+
+static int writeAll(const unsigned char *bytes, int length)
+{
+    int written = 0;
+    while (written < length)
+    {
+        int result = writeBytesSerialPort(bytes + written, length - written);
+        if (result <= 0)
+            return -1;
+        written += result;
+    }
+    return 0;
+}
+
+static int appendStuffedByte(unsigned char byte, unsigned char *frame, int *length)
+{
+    if (byte == FLAG || byte == 0x7D)
+    {
+        frame[(*length)++] = 0x7D;
+        frame[(*length)++] = byte ^ 0x20;
+    }
+    else
+    {
+        frame[(*length)++] = byte;
+    }
+    return 0;
+}
+
+static unsigned char rrControl(unsigned char nr)
+{
+    return nr ? C_RR1 : C_RR0;
+}
+
+static unsigned char rejControl(unsigned char nr)
+{
+    return nr ? C_REJ1 : C_REJ0;
+}
+
+static int sendSupervision(unsigned char address, unsigned char control)
+{
+    unsigned char frame[SUPERVISION_FRAME_SIZE] = {
+        FLAG, address, control, address ^ control, FLAG};
+    return writeAll(frame, SUPERVISION_FRAME_SIZE);
+}
+
+// Lê uma trama delimitada por FLAG e remove o byte stuffing.
+// Retorna 0 com o conteúdo e comprimento, 1 para trama malformada e -1 para erro I/O.
+static int readFrame(unsigned char *content, int capacity, int *contentLength)
+{
+    unsigned char byte;
+    int length = 0;
+    int malformed = 0;
+    int escaped = 0;
+
+    while (1)
+    {
+        int result = readByteSerialPort(&byte);
+        if (result < 0)
+            return -1;
+        if (result == 1 && byte == FLAG)
+            break;
+    }
+
+    while (1)
+    {
+        int result = readByteSerialPort(&byte);
+        if (result < 0)
+            return -1;
+        if (result == 0)
+            continue;
+
+        if (byte == FLAG)
+        {
+            if (length == 0 && !malformed)
+                continue; // FLAGs consecutivos: continua à procura do conteúdo.
+            *contentLength = length;
+            return malformed || escaped ? 1 : 0;
+        }
+
+        if (escaped)
+        {
+            if (byte != 0x5E && byte != 0x5D)
+                malformed = 1;
+            if (length < capacity)
+                content[length++] = byte ^ 0x20;
+            else
+                malformed = 1;
+            escaped = 0;
+        }
+        else if (byte == 0x7D)
+        {
+            escaped = 1;
+        }
+        else if (length < capacity)
+        {
+            content[length++] = byte;
+        }
+        else
+        {
+            malformed = 1;
+        }
+    }
+}
 
 // Procura o FLAG inicial e lê o resto de uma trama de supervisão.
 // Por agora, SET/UA têm tamanho fixo de cinco bytes.
@@ -70,6 +181,9 @@ int llOpenTx(LinkLayer llParameters)
         return -1;
     }
     linkIsOpen = 1;
+    linkIsTx = 1;
+    nextTxSequence = 0;
+    expectedRxSequence = 0;
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
@@ -95,8 +209,8 @@ int llOpenTx(LinkLayer llParameters)
     printf("Resposta recebida: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n", uaFrame[0], uaFrame[1], uaFrame[2], uaFrame[3], uaFrame[4]);
 
     // Confirma se a resposta recebida é um UA válido.
-    if (uaFrame[0] != FLAG || uaFrame[1] != A_RX || uaFrame[2] != C_UA ||
-        uaFrame[3] != (A_RX ^ C_UA) || uaFrame[4] != FLAG)
+    if (uaFrame[0] != FLAG || uaFrame[1] != A_TX || uaFrame[2] != C_UA ||
+        uaFrame[3] != (A_TX ^ C_UA) || uaFrame[4] != FLAG)
     {
         printf("Erro: a trama recebida nao e um UA valido.\n");
         return closeLinkOnError();
@@ -118,6 +232,9 @@ int llOpenRx(LinkLayer llParameters)
         return -1;
     }
     linkIsOpen = 1;
+    linkIsTx = 0;
+    nextTxSequence = 0;
+    expectedRxSequence = 0;
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
@@ -141,7 +258,7 @@ int llOpenRx(LinkLayer llParameters)
 
     // Se o SET estiver certo, responde com UA.
     unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
-        FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
+        FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG};
 
     int bytesWritten = writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE);
     if (bytesWritten != SUPERVISION_FRAME_SIZE)
@@ -161,9 +278,57 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // TODO: Implement this function
+    if (!linkIsOpen || !linkIsTx || buf == NULL ||
+        bufSize < 0 || bufSize > MAX_PAYLOAD_SIZE)
+        return -1;
 
-    return 0;
+    unsigned char unstuffed[MAX_PAYLOAD_SIZE + 4];
+    unsigned char txFrame[2 * (MAX_PAYLOAD_SIZE + 4) + 2];
+    unsigned char reply[MAX_FRAME_CONTENT_SIZE];
+    int unstuffedLength = 4 + bufSize;
+
+    unstuffed[0] = A_TX;
+    unstuffed[1] = nextTxSequence ? 0x80 : 0x00;
+    unstuffed[2] = unstuffed[0] ^ unstuffed[1];
+    unsigned char bcc2 = 0;
+    for (int i = 0; i < bufSize; i++)
+    {
+        unstuffed[3 + i] = buf[i];
+        bcc2 ^= buf[i];
+    }
+    unstuffed[3 + bufSize] = bcc2;
+
+    int txLength = 0;
+    txFrame[txLength++] = FLAG;
+    for (int i = 0; i < unstuffedLength; i++)
+        appendStuffedByte(unstuffed[i], txFrame, &txLength);
+    txFrame[txLength++] = FLAG;
+
+    while (1)
+    {
+        if (writeAll(txFrame, txLength) < 0)
+            return -1;
+
+        while (1)
+        {
+            int replyLength = 0;
+            int result = readFrame(reply, MAX_FRAME_CONTENT_SIZE, &replyLength);
+            if (result < 0)
+                return -1;
+            if (result > 0 || replyLength != 3 || reply[0] != A_TX ||
+                reply[2] != (reply[0] ^ reply[1]))
+                continue;
+
+            if (reply[1] == rrControl((unsigned char)(nextTxSequence ^ 1)))
+            {
+                nextTxSequence ^= 1;
+                return bufSize;
+            }
+            if (reply[1] == rejControl(nextTxSequence))
+                break; // REJ: volta a enviar a mesma trama I.
+        }
+    }
+
 }
 
 ////////////////////////////////////////////////
@@ -171,9 +336,66 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function
+    if (!linkIsOpen || linkIsTx || packet == NULL)
+        return -1;
 
-    return 0;
+    unsigned char frame[MAX_FRAME_CONTENT_SIZE];
+    while (1)
+    {
+        int length = 0;
+        int result = readFrame(frame, MAX_FRAME_CONTENT_SIZE, &length);
+        if (result < 0)
+            return -1;
+        if (result > 0 || length < 4 || frame[0] != A_TX ||
+            frame[2] != (frame[0] ^ frame[1]))
+            continue; // Cabeçalho inválido ou trama malformada: ignora.
+
+        unsigned char ns;
+        if (frame[1] == 0x00)
+            ns = 0;
+        else if (frame[1] == 0x80)
+            ns = 1;
+        else
+            continue;
+
+        int dataLength = length - 4; // A, C, BCC1 e BCC2 estão fora dos dados.
+        unsigned char bcc2 = 0;
+        for (int i = 0; i < dataLength; i++)
+            bcc2 ^= frame[3 + i];
+
+        if (bcc2 != frame[length - 1])
+        {
+            if (ns == expectedRxSequence)
+            {
+                if (sendSupervision(A_TX, rejControl(expectedRxSequence)) < 0)
+                    return -1;
+            }
+            else if (sendSupervision(A_TX, rrControl(expectedRxSequence)) < 0)
+            {
+                return -1;
+            }
+            continue;
+        }
+
+        if (dataLength > MAX_PAYLOAD_SIZE)
+            continue;
+
+        if (ns != expectedRxSequence)
+        {
+            // Duplicado: não entrega os dados outra vez, mas confirma o estado atual.
+            if (sendSupervision(A_TX, rrControl(expectedRxSequence)) < 0)
+                return -1;
+            continue;
+        }
+
+        for (int i = 0; i < dataLength; i++)
+            packet[i] = frame[3 + i];
+        expectedRxSequence ^= 1;
+        if (sendSupervision(A_TX, rrControl(expectedRxSequence)) < 0)
+            return -1;
+        return dataLength;
+    }
+
 }
 
 ////////////////////////////////////////////////
@@ -207,7 +429,7 @@ int llCloseTx()
     }
 
     unsigned char uaFrame[SUPERVISION_FRAME_SIZE] = {
-        FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG};
+        FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG};
     if (writeBytesSerialPort(uaFrame, SUPERVISION_FRAME_SIZE) != SUPERVISION_FRAME_SIZE)
     {
         printf("Erro ao enviar a trama UA.\n");
@@ -258,8 +480,8 @@ int llCloseRx()
         perror("readByteSerialPort");
         return closeLinkOnError();
     }
-    if (receivedFrame[1] != A_TX || receivedFrame[2] != C_UA ||
-        receivedFrame[3] != (A_TX ^ C_UA) || receivedFrame[4] != FLAG)
+    if (receivedFrame[1] != A_RX || receivedFrame[2] != C_UA ||
+        receivedFrame[3] != (A_RX ^ C_UA) || receivedFrame[4] != FLAG)
     {
         printf("Erro: a trama recebida nao e um UA valido.\n");
         return closeLinkOnError();
