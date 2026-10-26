@@ -1,4 +1,4 @@
-PROTOCOLO DE LIGAÇÃO DE DADOS - 1.º TRABALHO LABORATORIAL
+PROTOCOLO DE LIGAÇÃO DE DADOS - TRABALHO LABORATORIAL 1
 Redes de Computadores (RCOM) - FEUP - 2026/2027
 ==========================================================
 
@@ -38,9 +38,8 @@ Descrição dos ficheiros
 | Ficheiro | Origem | O que faz |
 |---|---|---|
 | `src/main.c` | Fornecido, não alterado | Lê os argumentos (porta, baudrate, tx/rx e ficheiro) e chama a camada de aplicação. Define `N_TRIES = 3` e `TIMEOUT = 4` s. |
-| `src/application_layer.c/.h` | Desenvolvido | Camada de aplicação. O emissor envia o pacote START, os pacotes DATA com os fragmentos do ficheiro e o pacote END. O recetor escreve o ficheiro e confirma que o tamanho recebido é o anunciado no START. |
-| `src/link_layer.c` | Desenvolvido | Camada de ligação de dados: `llOpenTx`/`llOpenRx` (SET/UA), `llSend` (envia a trama I até receber RR), `llReceive` (RR para tramas novas e duplicadas, REJ para erros nos dados) e `llCloseTx`/`llCloseRx` (DISC/DISC/UA e estatísticas). A função `transmit()` trata de todas as retransmissões. |
-| `src/link_layer.h` | Fornecido, não alterado | Interface da camada de ligação usada pela aplicação. |
+| `src/application_layer.c/.h` | Fornecido, alterado | Camada de aplicação. O emissor envia o pacote START, os pacotes DATA com os fragmentos do ficheiro e o pacote END. O recetor escreve o ficheiro e confirma que o tamanho recebido é o anunciado no START. |
+| `src/link_layer.c/.h` | Fornecido, alterado | Camada de ligação de dados: `llOpenTx`/`llOpenRx` (SET/UA), `llSend` (envia a trama I até receber RR), `llReceive` (RR para tramas novas e duplicadas, REJ para erros nos dados) e `llCloseTx`/`llCloseRx` (DISC/DISC/UA e estatísticas). A função `transmit()` trata de todas as retransmissões. |
 | `src/frame.c/.h` | Desenvolvido | Tramas: constantes (FLAG, A, C, ESC), construção das tramas I e de supervisão, byte stuffing, BCC2 e a máquina de estados `readFrame`, que lê a trama byte a byte, faz o destuffing e verifica o BCC1 e o BCC2. |
 | `src/alarm.c/.h` | Desenvolvido | Alarme dos timeouts (SIGALRM): liga e desliga o alarme e conta os timeouts. |
 | `src/statistics.c/.h` | Desenvolvido | Estatísticas: tramas, bytes de dados, retransmissões, REJ, duplicados, timeouts e tempo total. Calcula o débito R (bit/s) e a eficiência S = R / C. |
