@@ -25,6 +25,6 @@ void startStatsClock();
 
 double elapsedTime();
 
-void printStats(int transmitter, double seconds);
+void printStats(int transmitter, double seconds, int baudRate);
 
 #endif // STATISTICS_H

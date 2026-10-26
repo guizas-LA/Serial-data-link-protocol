@@ -25,7 +25,7 @@ double elapsedTime() {
     return (now.tv_sec - stats.start.tv_sec) + (now.tv_nsec - stats.start.tv_nsec) / 1e9;
 }
 
-void printStats(int transmitter, double seconds) {
+void printStats(int transmitter, double seconds, int baudRate) {
     printf("\n-------------------------------\n");
     printf("      Estatísticas (%s)    ", transmitter ? "emissor" : "recetor");
     printf("\n-------------------------------\n");
@@ -46,5 +46,16 @@ void printStats(int transmitter, double seconds) {
     }
     printf("Retransmissões: %d\n", stats.retransmissions);
     printf("Timeouts: %d\n", timeouts);
+
+    long dataBits = stats.dataBytes * 8;
+    double bitrate = 0;
+    if (seconds > 0)  
+        bitrate = dataBits / seconds;
+
+    double efficiency = bitrate / baudRate;
+
+    printf("Débito (R): %.1f bit/s\n", bitrate);
+    printf("Capacidade (C): %d bit/s\n", baudRate);
+    printf("Eficiência (S = R/C): %.4f\n", efficiency);
     printf("-------------------------------\n");
 }

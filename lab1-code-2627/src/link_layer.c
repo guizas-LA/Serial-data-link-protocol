@@ -6,60 +6,42 @@
 #include "alarm.h"
 #include "frame.h"
 #include "serial_port.h"
+#include "simulation.h"
 #include "statistics.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
+#define NO_REJ -1 
+
 typedef enum {
-    RR,  
-    REJ, 
-    NONE 
+    RR,   // expected answer received
+    REJ,
+    NONE
 } Answer;
 
 static LinkLayer parameters;
-
-static unsigned char txSequence = 0; 
-static unsigned char rxSequence = 0; 
+static unsigned char sequence = 0;
 
 ////////////////////////////////////////////////
 // RETRANSMISSION AND ANSWERS
 ////////////////////////////////////////////////
 
-static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, unsigned char answerC) {
-    for (int try = 0; try <= parameters.nRetransmissions; try++) {
-        if (try > 0)
-            stats.retransmissions++;
-
-        if (sendSupervisionFrame(a, c) != SU_FRAME_SIZE)
-            return -1;
-
-        startAlarm(parameters.timeout);
-        int result = receiveSupervisionFrame(answerA, answerC);
-        stopAlarm();
-
-        if (result == 0) return 0;
-    }
-
-    return -1;
-}
-
-
-static Answer waitAnswer(unsigned char ns) {
+static Answer waitAnswer(unsigned char answerA, unsigned char answerC, int rejC) {
     Frame frame;
 
     while (TRUE) {
         FrameResult result = readFrame(&frame);
         if (result == FRAME_TIMEOUT || result == FRAME_IO_ERROR)
             return NONE;
-        if (result != FRAME_OK || frame.a != A_TX)
+        if (result != FRAME_OK || frame.a != answerA)
             continue;
 
-        if (frame.c == C_RR(ns ^ 1)) {
+        if (frame.c == answerC) {
             printf("Recebido %s\n", frameName(frame.c));
             return RR;
         }
-        if (frame.c == C_REJ(ns)) {
+        if (frame.c == rejC) {
             printf("Recebido %s\n", frameName(frame.c));
             stats.rejCount++;
             return REJ;
@@ -68,19 +50,81 @@ static Answer waitAnswer(unsigned char ns) {
 }
 
 
+static int transmit(const unsigned char *frame, int frameSize, unsigned char answerA, unsigned char answerC, int rejC) {
+    unsigned char c = frame[2];
+
+    for (int try = 0; try <= parameters.nRetransmissions; try++) {
+        if (try > 0)
+            stats.retransmissions++;
+
+        if (writeFrame(frame, frameSize) < 0)
+            return -1;
+
+        if (isInformationFrame(c))
+            stats.iFramesSent++;
+        printf("Enviado %s (%d bytes)%s\n", frameName(c), frameSize, try > 0 ? " [retransmissão]" : "");
+
+        startAlarm(parameters.timeout);
+        Answer answer = waitAnswer(answerA, answerC, rejC);
+        stopAlarm();
+
+        if (answer == RR)
+            return 0;
+    }
+
+    printf("%s não foi confirmado, a desistir.\n", frameName(c));
+
+    return -1;
+}
+
+
+static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, unsigned char answerC) {
+    unsigned char frame[SU_FRAME_SIZE];
+    int frameSize = buildSupervisionFrame(frame, a, c);
+
+    return transmit(frame, frameSize, answerA, answerC, NO_REJ);
+}
+
+
 static int answerDuplicate(unsigned char ns) {
     stats.duplicates++;
     printf("Recebido I%d outra vez (duplicado, descartado)\n", ns);
 
-    return sendSupervisionFrame(A_TX, C_RR(rxSequence)) == SU_FRAME_SIZE ? 0 : -1;
+    return sendSupervisionFrame(A_TX, C_RR(sequence)) == SU_FRAME_SIZE ? 0 : -1;
+}
+
+
+static int handleInformationFrame(const Frame *frame, FrameResult result, unsigned char *packet) {
+    unsigned char ns = frame->c >> 7;
+
+    if (ns != sequence)
+        return answerDuplicate(ns);
+
+    if (result == FRAME_DATA_ERROR) {
+        printf("Recebido I%d com erro no campo de dados (descartado)\n", ns);
+        stats.rejCount++;
+        return sendSupervisionFrame(A_TX, C_REJ(ns)) == SU_FRAME_SIZE ? 0 : -1;
+    }
+
+    printf("Recebido I%d (%d bytes de dados)\n", ns, frame->dataSize);
+    memcpy(packet, frame->data, frame->dataSize);
+    stats.frames++;
+    stats.dataBytes += frame->dataSize;
+
+    sequence ^= 1;
+    if (sendSupervisionFrame(A_TX, C_RR(sequence)) != SU_FRAME_SIZE)
+        return -1;
+
+    return frame->dataSize;
 }
 
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
-int llOpenTx(LinkLayer llParameters) {
+
+static int setupConnection(LinkLayer llParameters) {
     parameters = llParameters;
-    txSequence = 0;
+    sequence = 0;
     resetStats();
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
@@ -95,8 +139,14 @@ int llOpenTx(LinkLayer llParameters) {
         return -1;
     }
 
+    return 0;
+}
+
+int llOpenTx(LinkLayer llParameters) {
+    if (setupConnection(llParameters) < 0)
+        return -1;
+
     if (sendAndWait(A_TX, C_SET, A_TX, C_UA) < 0) {
-        printf("Nenhum UA recebido, a desistir.\n");
         closeSerialPort();
         return -1;
     }
@@ -108,21 +158,10 @@ int llOpenTx(LinkLayer llParameters) {
 }
 
 int llOpenRx(LinkLayer llParameters) {
-    parameters = llParameters;
-    rxSequence = 0;
-    resetStats();
-
-    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
-        perror("openSerialPort");
+    if (setupConnection(llParameters) < 0)
         return -1;
-    }
 
-    printf("Porta série %s aberta\n", llParameters.serialPort);
-
-    if (installAlarm() < 0) {
-        closeSerialPort();
-        return -1;
-    }
+    initSimulation();
 
     if (receiveSupervisionFrame(A_TX, C_SET) < 0 || sendSupervisionFrame(A_TX, C_UA) != SU_FRAME_SIZE) {
         closeSerialPort();
@@ -145,35 +184,16 @@ int llSend(const unsigned char *buf, int bufSize) {
     }
 
     unsigned char frame[MAX_I_FRAME_SIZE];
-    int frameSize = buildInformationFrame(frame, buf, bufSize, txSequence);
+    int frameSize = buildInformationFrame(frame, buf, bufSize, sequence);
 
+    if (transmit(frame, frameSize, A_TX, C_RR(sequence ^ 1), C_REJ(sequence)) < 0)
+        return -1;
 
-    for (int try = 0; try <= parameters.nRetransmissions; try++) {
-        if (try > 0)
-            stats.retransmissions++;
+    sequence ^= 1;
+    stats.frames++;
+    stats.dataBytes += bufSize;
 
-        if (writeFrame(frame, frameSize) < 0)
-            return -1;
-
-        stats.iFramesSent++;
-        printf("Enviado I%d (%d bytes de dados, %d bytes após stuffing)%s\n",
-               txSequence, bufSize, frameSize, try > 0 ? " [retransmissão]" : "");
-
-        startAlarm(parameters.timeout);
-        Answer answer = waitAnswer(txSequence);
-        stopAlarm();
-
-        if (answer == RR) {
-            txSequence ^= 1;
-            stats.frames++;
-            stats.dataBytes += bufSize;
-            return bufSize;
-        }
-    }
-
-    printf("I%d não foi confirmado, a desistir.\n", txSequence);
-
-    return -1;
+    return bufSize;
 }
 
 ////////////////////////////////////////////////
@@ -186,43 +206,32 @@ int llReceive(unsigned char *packet) {
         FrameResult result = readFrame(&frame);
         if (result == FRAME_TIMEOUT || result == FRAME_IO_ERROR)
             return -1;
+        if (frame.a != A_TX)
+            continue;
 
-        if (result == FRAME_OK && frame.a == A_TX && frame.c == C_SET) {
+        if (result == FRAME_OK && frame.c == C_SET) {
             printf("Recebido SET outra vez (o UA perdeu-se)\n");
             if (sendSupervisionFrame(A_TX, C_UA) != SU_FRAME_SIZE)
                 return -1;
             continue;
         }
 
-        if (frame.a != A_TX || !isInformationFrame(frame.c))
+        if (!isInformationFrame(frame.c))
             continue;
 
-        unsigned char ns = (frame.c == C_I(1));
-
-        if (ns != rxSequence) {
-            if (answerDuplicate(ns) < 0)
-                return -1;
+        simulateDelay();
+        if (result == FRAME_OK && simulateHeaderError()) {
+            printf("[simulação] erro no cabeçalho de I%d (ignorada)\n", frame.c >> 7);
             continue;
         }
-
-        if (result == FRAME_DATA_ERROR) {
-            printf("Recebido I%d com erro no campo de dados (descartado)\n", ns);
-            stats.rejCount++;
-            if (sendSupervisionFrame(A_TX, C_REJ(ns)) != SU_FRAME_SIZE)
-                return -1;
-            continue;
+        if (result == FRAME_OK && simulateDataError()) {
+            printf("[simulação] erro nos dados de I%d\n", frame.c >> 7);
+            result = FRAME_DATA_ERROR;
         }
 
-        printf("Recebido I%d (%d bytes de dados)\n", ns, frame.dataSize);
-        memcpy(packet, frame.data, frame.dataSize);
-        stats.frames++;
-        stats.dataBytes += frame.dataSize;
-
-        rxSequence ^= 1;
-        if (sendSupervisionFrame(A_TX, C_RR(rxSequence)) != SU_FRAME_SIZE)
-            return -1;
-
-        return frame.dataSize;
+        int size = handleInformationFrame(&frame, result, packet);
+        if (size != 0)
+            return size;
     }
 }
 
@@ -232,12 +241,8 @@ int llReceive(unsigned char *packet) {
 int llCloseTx() {
     int result = sendAndWait(A_TX, C_DISC, A_RX, C_DISC);
 
-    if (result == 0) {
-        if (sendSupervisionFrame(A_RX, C_UA) != SU_FRAME_SIZE)
-            result = -1;
-    }
-    else
-        printf("Nenhum DISC recebido, a desistir.\n");
+    if (result == 0 && sendSupervisionFrame(A_RX, C_UA) != SU_FRAME_SIZE)
+        result = -1;
 
     double seconds = elapsedTime();
 
@@ -250,7 +255,7 @@ int llCloseTx() {
 
     printf("Porta série fechada\n");
 
-    printStats(TRUE, seconds);
+    printStats(TRUE, seconds, parameters.baudRate);
 
     return result;
 }
@@ -259,8 +264,7 @@ int llCloseRx() {
     int result = 0;
     Frame frame;
 
-    while (TRUE)
-    {
+    while (TRUE) {
         FrameResult frameResult = readFrame(&frame);
         if (frameResult == FRAME_TIMEOUT || frameResult == FRAME_IO_ERROR) {
             result = -1;
@@ -274,18 +278,15 @@ int llCloseRx() {
             break;
         }
 
-        unsigned char ns = (frame.c == C_I(1));
-        if (isInformationFrame(frame.c) && ns != rxSequence && answerDuplicate(ns) < 0) {
+        unsigned char ns = frame.c >> 7;
+        if (isInformationFrame(frame.c) && ns != sequence && answerDuplicate(ns) < 0) {
             result = -1;
             break;
         }
     }
 
-  
-    if (result == 0 && sendAndWait(A_RX, C_DISC, A_RX, C_UA) < 0) {
-        printf("Nenhum UA recebido , a desistir.\n");
+    if (result == 0 && sendAndWait(A_RX, C_DISC, A_RX, C_UA) < 0)
         result = -1;
-    }
 
     double seconds = elapsedTime();
 
@@ -296,7 +297,7 @@ int llCloseRx() {
 
     printf("Porta série fechada\n");
 
-    printStats(FALSE, seconds);
+    printStats(FALSE, seconds, parameters.baudRate);
 
     return result;
 }

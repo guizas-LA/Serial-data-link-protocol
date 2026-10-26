@@ -41,6 +41,8 @@ int isInformationFrame(unsigned char c);
 
 int buildInformationFrame(unsigned char *frame, const unsigned char *data, int dataSize, unsigned char ns);
 
+int buildSupervisionFrame(unsigned char *frame, unsigned char a, unsigned char c);
+
 int writeFrame(const unsigned char *frame, int frameSize);
 
 int sendSupervisionFrame(unsigned char a, unsigned char c);

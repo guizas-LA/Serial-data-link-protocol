@@ -111,8 +111,20 @@ int writeFrame(const unsigned char *frame, int frameSize) {
 }
 
 
+int buildSupervisionFrame(unsigned char *frame, unsigned char a, unsigned char c) {
+    frame[0] = FLAG;
+    frame[1] = a;
+    frame[2] = c;
+    frame[3] = a ^ c;
+    frame[4] = FLAG;
+
+    return SU_FRAME_SIZE;
+}
+
+
 int sendSupervisionFrame(unsigned char a, unsigned char c) {
-    unsigned char frame[SU_FRAME_SIZE] = {FLAG, a, c, a ^ c, FLAG};
+    unsigned char frame[SU_FRAME_SIZE];
+    buildSupervisionFrame(frame, a, c);
 
     int bytes = writeFrame(frame, SU_FRAME_SIZE);
 
