@@ -1,4 +1,4 @@
-PROTOCOLO DE LIGAÇÃO DE DADOS - TRABALHO LABORATORIAL 1
+PROTOCOLO DE LIGAÇÃO DE DADOS - Lab 1
 Redes de Computadores (RCOM) - FEUP - 2026/2027
 ==========================================================
 
