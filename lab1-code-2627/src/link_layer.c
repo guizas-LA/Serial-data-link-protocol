@@ -38,8 +38,7 @@ static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, 
         int result = receiveSupervisionFrame(answerA, answerC);
         stopAlarm();
 
-        if (result == 0)
-            return 0;
+        if (result == 0) return 0;
     }
 
     return -1;
@@ -82,18 +81,16 @@ static int answerDuplicate(unsigned char ns) {
 int llOpenTx(LinkLayer llParameters) {
     parameters = llParameters;
     txSequence = 0;
-    resetStatistics();
+    resetStats();
 
-    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
-    {
+    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
         perror("openSerialPort");
         return -1;
     }
 
     printf("Porta série %s aberta\n", llParameters.serialPort);
 
-    if (installAlarm() < 0)
-    {
+    if (installAlarm() < 0) {
         closeSerialPort();
         return -1;
     }
@@ -104,7 +101,7 @@ int llOpenTx(LinkLayer llParameters) {
         return -1;
     }
 
-    startStatisticsClock();
+    startStatsClock();
     printf("Ligação estabelecida.\n");
 
     return 0;
@@ -113,7 +110,7 @@ int llOpenTx(LinkLayer llParameters) {
 int llOpenRx(LinkLayer llParameters) {
     parameters = llParameters;
     rxSequence = 0;
-    resetStatistics();
+    resetStats();
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
         perror("openSerialPort");
@@ -132,7 +129,7 @@ int llOpenRx(LinkLayer llParameters) {
         return -1;
     }
 
-    startStatisticsClock();
+    startStatsClock();
     printf("Ligação estabelecida.\n");
 
     return 0;
@@ -253,7 +250,7 @@ int llCloseTx() {
 
     printf("Porta série fechada\n");
 
-    printStatistics(TRUE, seconds);
+    printStats(TRUE, seconds);
 
     return result;
 }
@@ -265,8 +262,7 @@ int llCloseRx() {
     while (TRUE)
     {
         FrameResult frameResult = readFrame(&frame);
-        if (frameResult == FRAME_TIMEOUT || frameResult == FRAME_IO_ERROR)
-        {
+        if (frameResult == FRAME_TIMEOUT || frameResult == FRAME_IO_ERROR) {
             result = -1;
             break;
         }
@@ -300,7 +296,7 @@ int llCloseRx() {
 
     printf("Porta série fechada\n");
 
-    printStatistics(FALSE, seconds);
+    printStats(FALSE, seconds);
 
     return result;
 }

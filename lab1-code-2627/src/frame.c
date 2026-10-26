@@ -48,7 +48,7 @@ const char *frameName(unsigned char c) {
 }
 
 int isInformationFrame(unsigned char c) {
-    return c == C_I(0) || c == C_I(1);
+    return (c & 0x7F) == 0; 
 }
 
 static unsigned char calcBCC2(const unsigned char *data, int dataSize) {
@@ -100,8 +100,7 @@ int buildInformationFrame(unsigned char *frame, const unsigned char *data, int d
 int writeFrame(const unsigned char *frame, int frameSize) {
     int written = 0;
 
-    while (written < frameSize)
-    {
+    while (written < frameSize) {
         int bytes = writeBytesSerialPort(frame + written, frameSize - written);
         if (bytes < 0)
             return -1;
@@ -126,11 +125,20 @@ int sendSupervisionFrame(unsigned char a, unsigned char c) {
 }
 
 
+static int addDataByte(Frame *frame, unsigned char byte) {
+    if (frame->dataSize == sizeof(frame->data))
+        return -1;
+
+    frame->data[frame->dataSize++] = byte;
+    return 0;
+}
+
+
 FrameResult readFrame(Frame *frame) {
     State state = START;
 
     while (TRUE) {
-        if (alarmFired)
+        if (alarmTriggered)
             return FRAME_TIMEOUT;
 
         unsigned char byte;
@@ -150,8 +158,7 @@ FrameResult readFrame(Frame *frame) {
             break;
 
         case FLAG_RCV:
-            if (byte == A_TX || byte == A_RX)
-            {
+            if (byte == A_TX || byte == A_RX) {
                 frame->a = byte;
                 state = A_RCV;
             }
@@ -162,16 +169,14 @@ FrameResult readFrame(Frame *frame) {
         case A_RCV:
             if (byte == FLAG)
                 state = FLAG_RCV;
-            else
-            {
+            else {
                 frame->c = byte;
                 state = C_RCV;
             }
             break;
 
         case C_RCV:
-            if (byte == (frame->a ^ frame->c))
-            {
+            if (byte == (frame->a ^ frame->c)) {
                 frame->dataSize = 0;
                 state = BCC1_OK;
             }
@@ -203,17 +208,15 @@ FrameResult readFrame(Frame *frame) {
                 state = ESC_RCV;
                 break;
             }
-            if (frame->dataSize == sizeof(frame->data))
+            if (addDataByte(frame, byte) < 0)
                 return FRAME_DATA_ERROR;
-            frame->data[frame->dataSize++] = byte;
             break;
 
-            case ESC_RCV:
+        case ESC_RCV:
             if (byte == FLAG)
                 return FRAME_DATA_ERROR;
-            if (frame->dataSize == sizeof(frame->data))
+            if (addDataByte(frame, byte ^ ESC_XOR) < 0)
                 return FRAME_DATA_ERROR;
-            frame->data[frame->dataSize++] = byte ^ ESC_XOR;
             state = DATA;
             break;
         }

@@ -7,14 +7,14 @@
 
 #include <signal.h>
 
-extern int alarmCount;
+extern int timeouts;
 
-extern volatile sig_atomic_t alarmFired;
-
-int installAlarm();
+extern volatile sig_atomic_t alarmTriggered;
 
 void startAlarm(int seconds);
 
 void stopAlarm();
+
+int installAlarm();
 
 #endif // ALARM_H

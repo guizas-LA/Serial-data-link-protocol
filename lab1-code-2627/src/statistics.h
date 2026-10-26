@@ -19,12 +19,12 @@ typedef struct {
 
 extern Statistics stats;
 
-void resetStatistics();
+void resetStats();
 
-void startStatisticsClock();
+void startStatsClock();
 
 double elapsedTime();
 
-void printStatistics(int transmitter, double seconds);
+void printStats(int transmitter, double seconds);
 
 #endif // STATISTICS_H
