@@ -12,10 +12,12 @@
 #include <string.h>
 #include <unistd.h>
 
-#define NO_REJ -1 
+#define NO_REJ -1
+
+#define MAX_REJ_RETRIES 20
 
 typedef enum {
-    RR,   // expected answer received
+    RR,   
     REJ,
     NONE
 } Answer;
@@ -52,17 +54,17 @@ static Answer waitAnswer(unsigned char answerA, unsigned char answerC, int rejC)
 
 static int transmit(const unsigned char *frame, int frameSize, unsigned char answerA, unsigned char answerC, int rejC) {
     unsigned char c = frame[2];
+    int timeoutRetries = 0;
+    int rejRetries = 0;
 
-    for (int try = 0; try <= parameters.nRetransmissions; try++) {
-        if (try > 0)
-            stats.retransmissions++;
-
+    while (TRUE) {
         if (writeFrame(frame, frameSize) < 0)
             return -1;
 
         if (isInformationFrame(c))
             stats.iFramesSent++;
-        printf("Enviado %s (%d bytes)%s\n", frameName(c), frameSize, try > 0 ? " [retransmissão]" : "");
+        int retransmission = timeoutRetries + rejRetries > 0;
+        printf("Enviado %s (%d bytes)%s\n", frameName(c), frameSize, retransmission ? " [retransmissão]" : "");
 
         startAlarm(parameters.timeout);
         Answer answer = waitAnswer(answerA, answerC, rejC);
@@ -70,6 +72,16 @@ static int transmit(const unsigned char *frame, int frameSize, unsigned char ans
 
         if (answer == RR)
             return 0;
+
+        if (answer == REJ)
+            rejRetries++;
+        else
+            timeoutRetries++;
+
+        if (timeoutRetries > parameters.nRetransmissions || rejRetries > MAX_REJ_RETRIES)
+            break;
+
+        stats.retransmissions++;
     }
 
     printf("%s não foi confirmado, a desistir.\n", frameName(c));
@@ -83,6 +95,20 @@ static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, 
     int frameSize = buildSupervisionFrame(frame, a, c);
 
     return transmit(frame, frameSize, answerA, answerC, NO_REJ);
+}
+
+
+static FrameResult readFrameOrGiveUp(Frame *frame) {
+    int seconds = parameters.timeout * (parameters.nRetransmissions + 2);
+
+    startAlarm(seconds);
+    FrameResult result = readFrame(frame);
+    stopAlarm();
+
+    if (result == FRAME_TIMEOUT)
+        printf("Nenhuma trama recebida em %d s, o emissor desistiu.\n", seconds);
+
+    return result;
 }
 
 
@@ -203,7 +229,7 @@ int llReceive(unsigned char *packet) {
     Frame frame;
 
     while (TRUE) {
-        FrameResult result = readFrame(&frame);
+        FrameResult result = readFrameOrGiveUp(&frame);
         if (result == FRAME_TIMEOUT || result == FRAME_IO_ERROR)
             return -1;
         if (frame.a != A_TX)
@@ -265,7 +291,7 @@ int llCloseRx() {
     Frame frame;
 
     while (TRUE) {
-        FrameResult frameResult = readFrame(&frame);
+        FrameResult frameResult = readFrameOrGiveUp(&frame);
         if (frameResult == FRAME_TIMEOUT || frameResult == FRAME_IO_ERROR) {
             result = -1;
             break;
