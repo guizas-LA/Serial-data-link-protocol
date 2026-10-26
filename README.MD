@@ -35,62 +35,28 @@ das tramas.
 Descrição dos ficheiros
 -----------------------
 
-src/main.c                (fornecido, não alterado)
-    Lê os argumentos da linha de comandos (porta, baudrate, papel tx/rx e ficheiro)
-    e chama a camada de aplicação. Define o número de tentativas (N_TRIES = 3) e o
-    timeout (TIMEOUT = 4 s).
+| Ficheiro | Origem | O que faz |
+|---|---|---|
+| `src/main.c` | Fornecido, não alterado | Lê os argumentos (porta, baudrate, tx/rx e ficheiro) e chama a camada de aplicação. Define `N_TRIES = 3` e `TIMEOUT = 4` s. |
+| `src/application_layer.c/.h` | Desenvolvido | Camada de aplicação. O emissor envia o pacote START, os pacotes DATA com os fragmentos do ficheiro e o pacote END. O recetor escreve o ficheiro e confirma que o tamanho recebido é o anunciado no START. |
+| `src/link_layer.c` | Desenvolvido | Camada de ligação de dados: `llOpenTx`/`llOpenRx` (SET/UA), `llSend` (envia a trama I até receber RR), `llReceive` (RR para tramas novas e duplicadas, REJ para erros nos dados) e `llCloseTx`/`llCloseRx` (DISC/DISC/UA e estatísticas). A função `transmit()` trata de todas as retransmissões. |
+| `src/link_layer.h` | Fornecido, não alterado | Interface da camada de ligação usada pela aplicação. |
+| `src/frame.c/.h` | Desenvolvido | Tramas: constantes (FLAG, A, C, ESC), construção das tramas I e de supervisão, byte stuffing, BCC2 e a máquina de estados `readFrame`, que lê a trama byte a byte, faz o destuffing e verifica o BCC1 e o BCC2. |
+| `src/alarm.c/.h` | Desenvolvido | Alarme dos timeouts (SIGALRM): liga e desliga o alarme e conta os timeouts. |
+| `src/statistics.c/.h` | Desenvolvido | Estatísticas: tramas, bytes de dados, retransmissões, REJ, duplicados, timeouts e tempo total. Calcula o débito R (bit/s) e a eficiência S = R / C. |
+| `src/simulation.c/.h` | Desenvolvido | Simulação de erros e de atraso no recetor, para caracterizar a eficiência. Desligada por omissão (ver abaixo). |
+| `src/serial_port.c/.h` | Fornecido, não alterado | Biblioteca de acesso à porta série. |
+| `cable/cable.c` | Fornecido, não alterado | Cabo virtual entre `/tmp/ttyS10` e `/tmp/ttyS11`, que permite desligar a ligação ou adicionar ruído. |
+| `Makefile` | Fornecido, não alterado | Compila o programa e o cabo virtual e tem atalhos para correr o emissor e o recetor. |
+| `penguin.gif` | Fornecido | Ficheiro de exemplo usado nos testes. |
 
-src/application_layer.c/.h
-    Camada de aplicação. No emissor lê o ficheiro, envia o pacote START, os pacotes
-    DATA com os fragmentos do ficheiro e o pacote END. No recetor recebe os pacotes,
-    escreve o ficheiro e verifica se o tamanho recebido coincide com o anunciado no START.
+Para ativar a simulação, alteram-se os valores no topo de `src/simulation.h` e volta-se a compilar:
 
-src/link_layer.c/.h       (o .h é fornecido e não foi alterado)
-    Camada de ligação de dados: implementa a API usada pela aplicação.
-    - llOpenTx / llOpenRx: abrem a porta série e trocam SET/UA.
-    - llSend: monta a trama I e envia-a até receber o RR, retransmitindo após um
-      timeout ou um REJ.
-    - llReceive: recebe tramas I e aplica as regras de receção do guião (trama nova:
-      entrega e RR; duplicado: descarta e RR; erro nos dados: descarta e REJ).
-    - llCloseTx / llCloseRx: trocam DISC/DISC/UA, fecham a porta e mostram as estatísticas.
-    A função transmit() concentra num único ciclo toda a lógica de retransmissão
-    (usada pelas tramas I, SET e DISC).
-
-src/frame.c/.h
-    Tudo o que diz respeito às tramas: constantes (FLAG, A, C, ESC), construção das
-    tramas I e de supervisão, byte stuffing, cálculo do BCC2, escrita na porta série
-    e a máquina de estados que lê e valida uma trama byte a byte (readFrame), fazendo
-    o destuffing e a verificação de BCC1 e BCC2.
-
-src/alarm.c/.h
-    Alarme usado nos timeouts (SIGALRM). Permite ligar e desligar o alarme e conta
-    quantos timeouts ocorreram.
-
-src/statistics.c/.h
-    Estatísticas da ligação: tramas enviadas e recebidas, bytes de dados,
-    retransmissões, REJ, duplicados, timeouts e tempo total. Calcula também o débito
-    útil R (bit/s) e a eficiência S = R / C, em que C é o baudrate.
-
-src/simulation.c/.h
-    Simulação de erros e de atraso de propagação no recetor, para a caracterização
-    da eficiência do protocolo. Por omissão está desligada (todos os valores a 0).
-    Para a ativar, alteram-se os valores no topo de simulation.h e volta-se a compilar:
-        FER_HEADER  probabilidade de erro no cabeçalho de cada trama I
-        FER_DATA    probabilidade de erro no campo de dados de cada trama I
-        T_PROP_MS   atraso de propagação simulado, em milissegundos
-
-src/serial_port.c/.h      (fornecidos, não alterados)
-    Biblioteca de acesso à porta série.
-
-cable/cable.c             (fornecido, não alterado)
-    Cabo virtual que liga /tmp/ttyS10 a /tmp/ttyS11 e permite desligar a ligação ou
-    adicionar ruído durante os testes.
-
-Makefile                  (fornecido, não alterado)
-    Compila o programa e o cabo virtual e tem atalhos para correr o emissor e o recetor.
-
-penguin.gif
-    Ficheiro de exemplo usado nos testes.
+| Constante | Significado | Por omissão |
+|---|---|---|
+| `FER_HEADER` | Probabilidade (0.0 a 1.0) de erro no cabeçalho de cada trama I | 0.0 |
+| `FER_DATA` | Probabilidade (0.0 a 1.0) de erro no campo de dados de cada trama I | 0.0 |
+| `T_PROP_MS` | Atraso de propagação simulado, em milissegundos | 0 |
 
 
 Como compilar e executar
@@ -99,7 +65,7 @@ Como compilar e executar
 1. Compilar:
        $ make
 
-2. Arrancar o cabo virtual (requer o socat instalado):
+2. Arrancar o cabo virtual:
        $ make run_cable
 
 3. Noutro terminal, arrancar o recetor:
