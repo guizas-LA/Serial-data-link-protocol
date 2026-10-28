@@ -14,14 +14,17 @@
 
 #define NO_REJ -1
 
+// Maximo de REJ seguidos para a mesma trama (os timeouts usam o nRetransmissions)
 #define MAX_REJ_RETRIES 20
 
+// Resposta recebida pelo emissor
 typedef enum {
     RR,   
     REJ,
     NONE
 } Answer;
 
+// Parametros da ligacao e numero de sequencia atual (Ns no emissor, esperado no recetor)
 static LinkLayer parameters;
 static unsigned char sequence = 0;
 
@@ -29,6 +32,7 @@ static unsigned char sequence = 0;
 // RETRANSMISSION AND ANSWERS
 ////////////////////////////////////////////////
 
+// Espera pela resposta a uma trama: RR (confirmada), REJ ou NONE (timeout)
 static Answer waitAnswer(unsigned char answerA, unsigned char answerC, int rejC) {
     Frame frame;
 
@@ -52,6 +56,7 @@ static Answer waitAnswer(unsigned char answerA, unsigned char answerC, int rejC)
 }
 
 
+// Envia uma trama e retransmite em caso de timeout ou REJ (Stop-and-Wait)
 static int transmit(const unsigned char *frame, int frameSize, unsigned char answerA, unsigned char answerC, int rejC) {
     unsigned char c = frame[2];
     int timeoutRetries = 0;
@@ -78,6 +83,7 @@ static int transmit(const unsigned char *frame, int frameSize, unsigned char ans
         else
             timeoutRetries++;
 
+        // Desiste se houver demasiados timeouts ou demasiados REJ
         if (timeoutRetries > parameters.nRetransmissions || rejRetries > MAX_REJ_RETRIES)
             break;
 
@@ -90,6 +96,7 @@ static int transmit(const unsigned char *frame, int frameSize, unsigned char ans
 }
 
 
+// Envia uma trama de supervisao (SET ou DISC) e espera pela resposta
 static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, unsigned char answerC) {
     unsigned char frame[SU_FRAME_SIZE];
     int frameSize = buildSupervisionFrame(frame, a, c);
@@ -98,6 +105,7 @@ static int sendAndWait(unsigned char a, unsigned char c, unsigned char answerA, 
 }
 
 
+// Le uma trama no recetor; se nada chegar durante muito tempo, o emissor desistiu
 static FrameResult readFrameOrGiveUp(Frame *frame) {
     int seconds = parameters.timeout * (parameters.nRetransmissions + 2);
 
@@ -112,6 +120,7 @@ static FrameResult readFrameOrGiveUp(Frame *frame) {
 }
 
 
+// Trama repetida: descarta os dados e volta a confirmar com RR
 static int answerDuplicate(unsigned char ns) {
     stats.duplicates++;
     printf("Recebido I%d outra vez (duplicado, descartado)\n", ns);
@@ -120,12 +129,14 @@ static int answerDuplicate(unsigned char ns) {
 }
 
 
+// Trata uma trama I recebida e responde com RR ou REJ
 static int handleInformationFrame(const Frame *frame, FrameResult result, unsigned char *packet) {
     unsigned char ns = frame->c >> 7;
 
     if (ns != sequence)
         return answerDuplicate(ns);
 
+    // Trama nova com erro no BCC2: pede a retransmissao com REJ
     if (result == FRAME_DATA_ERROR) {
         printf("Recebido I%d com erro no campo de dados (descartado)\n", ns);
         stats.rejCount++;
@@ -137,6 +148,7 @@ static int handleInformationFrame(const Frame *frame, FrameResult result, unsign
     stats.frames++;
     stats.dataBytes += frame->dataSize;
 
+    // Trama nova correta: passa ao proximo numero de sequencia e confirma
     sequence ^= 1;
     if (sendSupervisionFrame(A_TX, C_RR(sequence)) != SU_FRAME_SIZE)
         return -1;
@@ -148,6 +160,7 @@ static int handleInformationFrame(const Frame *frame, FrameResult result, unsign
 // LLOPEN
 ////////////////////////////////////////////////
 
+// Parte comum do llOpen: abre a porta serie e instala o alarme
 static int setupConnection(LinkLayer llParameters) {
     parameters = llParameters;
     sequence = 0;
@@ -168,6 +181,7 @@ static int setupConnection(LinkLayer llParameters) {
     return 0;
 }
 
+// Emissor: envia SET e espera pelo UA
 int llOpenTx(LinkLayer llParameters) {
     if (setupConnection(llParameters) < 0)
         return -1;
@@ -183,6 +197,7 @@ int llOpenTx(LinkLayer llParameters) {
     return 0;
 }
 
+// Recetor: espera pelo SET e responde com UA
 int llOpenRx(LinkLayer llParameters) {
     if (setupConnection(llParameters) < 0)
         return -1;
@@ -203,6 +218,7 @@ int llOpenRx(LinkLayer llParameters) {
 ////////////////////////////////////////////////
 // LLSEND
 ////////////////////////////////////////////////
+// Envia um pacote numa trama I e espera pela confirmacao
 int llSend(const unsigned char *buf, int bufSize) {
     if (buf == NULL || bufSize <= 0 || bufSize > MAX_PAYLOAD_SIZE) {
         printf("llSend: tamanho inválido %d (deve estar entre 1 e %d)\n", bufSize, MAX_PAYLOAD_SIZE);
@@ -215,6 +231,7 @@ int llSend(const unsigned char *buf, int bufSize) {
     if (transmit(frame, frameSize, A_TX, C_RR(sequence ^ 1), C_REJ(sequence)) < 0)
         return -1;
 
+    // Pacote confirmado: troca o Ns para a proxima trama
     sequence ^= 1;
     stats.frames++;
     stats.dataBytes += bufSize;
@@ -225,6 +242,7 @@ int llSend(const unsigned char *buf, int bufSize) {
 ////////////////////////////////////////////////
 // LLRECEIVE
 ////////////////////////////////////////////////
+// Recebe o proximo pacote novo (ignora duplicados e tramas com erro)
 int llReceive(unsigned char *packet) {
     Frame frame;
 
@@ -235,6 +253,7 @@ int llReceive(unsigned char *packet) {
         if (frame.a != A_TX)
             continue;
 
+        // SET repetido: o UA perdeu-se, por isso envia outra vez
         if (result == FRAME_OK && frame.c == C_SET) {
             printf("Recebido SET outra vez (o UA perdeu-se)\n");
             if (sendSupervisionFrame(A_TX, C_UA) != SU_FRAME_SIZE)
@@ -245,6 +264,7 @@ int llReceive(unsigned char *packet) {
         if (!isInformationFrame(frame.c))
             continue;
 
+        // Simulacao de atraso e erros (desligada por omissao em simulation.h)
         simulateDelay();
         if (result == FRAME_OK && simulateHeaderError()) {
             printf("[simulação] erro no cabeçalho de I%d (ignorada)\n", frame.c >> 7);
@@ -264,6 +284,7 @@ int llReceive(unsigned char *packet) {
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
+// Emissor: envia DISC, espera pelo DISC do recetor e responde com UA
 int llCloseTx() {
     int result = sendAndWait(A_TX, C_DISC, A_RX, C_DISC);
 
@@ -272,6 +293,7 @@ int llCloseTx() {
 
     double seconds = elapsedTime();
 
+    // Espera um pouco para o UA chegar antes de fechar a porta
     sleep(1);
 
     if (closeSerialPort() < 0) {
@@ -286,6 +308,7 @@ int llCloseTx() {
     return result;
 }
 
+// Recetor: espera pelo DISC, responde com DISC e espera pelo UA
 int llCloseRx() {
     int result = 0;
     Frame frame;
@@ -305,6 +328,7 @@ int llCloseRx() {
         }
 
         unsigned char ns = frame.c >> 7;
+        // Se a ultima trama I chegar outra vez, volta a confirmar
         if (isInformationFrame(frame.c) && ns != sequence && answerDuplicate(ns) < 0) {
             result = -1;
             break;

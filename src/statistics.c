@@ -8,16 +8,20 @@
 #include <stdio.h>
 #include <string.h>
 
+// Estatisticas da ligacao, partilhadas com o link_layer.c
 Statistics stats;
 
+// Guarda o instante em que a ligacao foi estabelecida
 void startStatsClock() {
     clock_gettime(CLOCK_MONOTONIC, &stats.start);
 }
 
+// Poe todos os contadores a zero
 void resetStats() {
     memset(&stats, 0, sizeof(stats));
 }
 
+// Devolve os segundos que passaram desde o startStatsClock
 double elapsedTime() {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -25,6 +29,7 @@ double elapsedTime() {
     return (now.tv_sec - stats.start.tv_sec) + (now.tv_nsec - stats.start.tv_nsec) / 1e9;
 }
 
+// Mostra as estatisticas do emissor ou do recetor no fim da ligacao
 void printStats(int transmitter, double seconds, int baudRate) {
     printf("\n-------------------------------\n");
     printf("      Estatísticas (%s)    ", transmitter ? "emissor" : "recetor");
@@ -47,6 +52,7 @@ void printStats(int transmitter, double seconds, int baudRate) {
     printf("Retransmissões: %d\n", stats.retransmissions);
     printf("Timeouts: %d\n", timeouts);
 
+    // Debito R = bits de dados / tempo e eficiencia S = R / C
     long dataBits = stats.dataBytes * 8;
     double bitrate = 0;
     if (seconds > 0)  
